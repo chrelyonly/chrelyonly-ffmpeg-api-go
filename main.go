@@ -39,10 +39,11 @@ var (
 )
 
 type generateRequest struct {
-	Image      string      `json:"image"`
-	Color      string      `json:"color"`
-	Similarity numberValue `json:"similarity"`
-	Blend      numberValue `json:"blend"`
+	Image       string      `json:"image"`
+	Color       string      `json:"color"`
+	TargetColor string      `json:"targetColor"` // 新增目标颜色字段
+	Similarity  numberValue `json:"similarity"`
+	Blend       numberValue `json:"blend"`
 }
 
 type synthesisRequest struct {
@@ -481,6 +482,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 }
+
 /**
  * 替换颜色
  */
@@ -509,7 +511,7 @@ func replaceColor(w http.ResponseWriter, r *http.Request) {
 		srcR, srcG, srcB = parseHexColor(safeColor)
 	}
 
-	// 2. 解析替换后的目标颜色（若 req 中未指定，默认替换为蓝色/紫色 0,119,255）
+	// 2. 解析替换后的目标颜色（若 req.TargetColor 未指定，默认替换为 0,119,255）
 	targetR, targetG, targetB := 0, 119, 255
 	if req.TargetColor != "" && safeColorPattern.MatchString(req.TargetColor) {
 		targetR, targetG, targetB = parseHexColor(req.TargetColor)
@@ -547,7 +549,6 @@ func replaceColor(w http.ResponseWriter, r *http.Request) {
 	outputFile := filepath.Join(timeDir, fmt.Sprintf("output.%s", outExt))
 
 	// 构建 geq 滤镜表达式
-	// if(eq(r(X,Y), srcR)*eq(g(X,Y), srcG)*eq(b(X,Y), srcB), targetR, r(X,Y))
 	filterExpr := fmt.Sprintf(
 		"format=rgb24,geq=r='if(eq(r(X,Y),%d)*eq(g(X,Y),%d)*eq(b(X,Y),%d),%d,r(X,Y))':g='if(eq(r(X,Y),%d)*eq(g(X,Y),%d)*eq(b(X,Y),%d),%d,g(X,Y))':b='if(eq(r(X,Y),%d)*eq(g(X,Y),%d)*eq(b(X,Y),%d),%d,b(X,Y))'",
 		srcR, srcG, srcB, targetR,
@@ -616,6 +617,7 @@ func parseHexColor(hexStr string) (int, int, int) {
 	b := int(val & 0xFF)
 	return r, g, b
 }
+
 /**
  * 合成图接口
  */
