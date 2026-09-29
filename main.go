@@ -41,7 +41,7 @@ var (
 type generateRequest struct {
 	Image       string      `json:"image"`
 	Color       string      `json:"color"`
-	TargetColor string      `json:"targetColor"` // 新增目标颜色字段
+	TargetColor string      `json:"targetColor"`
 	Similarity  numberValue `json:"similarity"`
 	Blend       numberValue `json:"blend"`
 }
@@ -90,8 +90,8 @@ func main() {
 	startCleanupTicker(imageRoot, cleanupMaxAge)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ffmpeg/generate", generateHandler)
 	mux.HandleFunc("/ffmpeg/replaceColor", replaceColor)
+	mux.HandleFunc("/ffmpeg/generate", generateHandler)
 	mux.HandleFunc("/ffmpeg/synthesis", synthesisHandler)
 
 	server := &http.Server{
@@ -483,11 +483,8 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-/**
- * 替换颜色
- */
 func replaceColor(w http.ResponseWriter, r *http.Request) {
-	log.Printf("📥 接收到替换颜色合成请求")
+	log.Printf("📥 接收到颜色替换合成请求")
 
 	var req generateRequest
 	if err := decodeJSONBody(w, r, &req); err != nil {
@@ -503,26 +500,24 @@ func replaceColor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. 解析要替换的源颜色（从 req.Color 中获取，默认纯红 255,0,0）
-	srcR, srcG, srcB := 255, 0, 0
-	safeColor := "0xFF0000"
-	if safeColorPattern.MatchString(req.Color) {
-		safeColor = req.Color
-		srcR, srcG, srcB = parseHexColor(safeColor)
+	if strings.TrimSpace(req.Color) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "没有提供Color替换前的颜色"})
+		return
 	}
 
-	// 2. 解析替换后的目标颜色（若 req.TargetColor 未指定，默认替换为 0,119,255）
-	targetR, targetG, targetB := 0, 119, 255
-	if req.TargetColor != "" && safeColorPattern.MatchString(req.TargetColor) {
-		targetR, targetG, targetB = parseHexColor(req.TargetColor)
+	if strings.TrimSpace(req.TargetColor) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "没有提供TargetColor替换后的颜色"})
+		return
 	}
+	safeColor := req.Color
+	targetColor := req.TargetColor
 
 	timeDir, err := createTimeDir(tempRoot)
 	if err != nil {
 		log.Printf("❌ 创建临时目录失败: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"code": 500,
-			"msg":  "ffmpeg合成服务器错误: " + err.Error(),
+			"msg":  "ffmpeg合成服务器错误" + err.Error(),
 		})
 		return
 	}
@@ -541,81 +536,86 @@ func replaceColor(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("💾 保存临时图片: %s", srcFile)
 
-	// 输出路径（使用对应扩展名，默认为 jpg）
-	outExt := ext
-	if outExt == "" {
-		outExt = "jpg"
-	}
-	outputFile := filepath.Join(timeDir, fmt.Sprintf("output.%s", outExt))
+	outputFile := filepath.Join(timeDir, "output.png")
 
-	// 构建 geq 滤镜表达式
+	// 1. 解析原颜色和目标颜色
+	srcR, srcG, srcB, err := parseHexColor(safeColor)
+	if err != nil {
+		// 处理颜色解析错误
+	}
+
+	trgR, trgG, trgB, err := parseHexColor(targetColor)
+	if err != nil {
+		// 处理颜色解析错误
+	}
+
+	// 2. 动态构建 geq 滤镜表达式
+	tolerance := 5 // 容差范围，如允许 ±5 的偏差
 	filterExpr := fmt.Sprintf(
-		"format=rgb24,geq=r='if(eq(r(X,Y),%d)*eq(g(X,Y),%d)*eq(b(X,Y),%d),%d,r(X,Y))':g='if(eq(r(X,Y),%d)*eq(g(X,Y),%d)*eq(b(X,Y),%d),%d,g(X,Y))':b='if(eq(r(X,Y),%d)*eq(g(X,Y),%d)*eq(b(X,Y),%d),%d,b(X,Y))'",
-		srcR, srcG, srcB, targetR,
-		srcR, srcG, srcB, targetG,
-		srcR, srcG, srcB, targetB,
+		"format=rgb24,geq=r='if(lte(abs(r(X,Y)-%d),%d)*lte(abs(g(X,Y)-%d),%d)*lte(abs(b(X,Y)-%d),%d),%d,r(X,Y))':g='if(lte(abs(r(X,Y)-%d),%d)*lte(abs(g(X,Y)-%d),%d)*lte(abs(b(X,Y)-%d),%d),%d,g(X,Y))':b='if(lte(abs(r(X,Y)-%d),%d)*lte(abs(g(X,Y)-%d),%d)*lte(abs(b(X,Y)-%d),%d),%d,b(X,Y))'",
+		srcR, tolerance, srcG, tolerance, srcB, tolerance, trgR,
+		srcR, tolerance, srcG, tolerance, srcB, tolerance, trgG,
+		srcR, tolerance, srcG, tolerance, srcB, tolerance, trgB,
 	)
 
-	// FFmpeg 命令配置
-	ffmpegArgs := []string{
+	// 3. 构建命令行参数
+	paletteArgs := []string{
 		"-y",
 		"-i", srcFile,
 		"-vf", filterExpr,
-		"-q:v", "2", // 高画质输出
+		"-q:v", "2",
 		outputFile,
 	}
 
-	if err := runExecCmd(ffmpegArgs); err != nil {
-		log.Printf("❌ 合成接口失败: %v", err)
+	if err := runExecCmd(paletteArgs); err != nil {
+		log.Printf("❌ 合并接口失败: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"code": 500,
-			"msg":  "ffmpeg合成服务器错误: " + err.Error(),
+			"msg":  "ffmpeg合成服务器错误" + err.Error(),
 		})
 		return
 	}
 
 	buffer, err := os.ReadFile(outputFile)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "合成失败：未生成图片文件"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "合成失败：未生成 GIF 文件"})
 		return
 	}
 
-	log.Printf("🎉 图片替换颜色完成，返回 Base64")
-
-	mimeType := "image/jpeg"
-	if outExt == "png" {
-		mimeType = "image/png"
-	}
+	log.Printf("🎉 GIF 合成完成，返回 Base64")
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"code": 200,
 		"msg":  "合成成功",
 		"data": map[string]any{
-			"ext":    outExt,
-			"base64": fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(buffer)),
+			"ext":         "png",
+			"color":       safeColor,
+			"safeColor":   safeColor,
+			"targetColor": targetColor,
+			"paletteArgs": paletteArgs,
+			"base64":      "data:image/gif;base64," + base64.StdEncoding.EncodeToString(buffer),
 		},
 	})
 }
 
-// 辅助函数：将 0xFF0000 或 #FF0000 等十六进制字符串转换为 R, G, B 数值
-func parseHexColor(hexStr string) (int, int, int) {
+// parseHexColor 将 "0xFEFEFE" 或 "#FEFEFE" 解析为 R, G, B (0-255)
+func parseHexColor(hexStr string) (int, int, int, error) {
 	hexStr = strings.TrimPrefix(hexStr, "0x")
-	hexStr = strings.TrimPrefix(hexStr, "0X")
 	hexStr = strings.TrimPrefix(hexStr, "#")
-
 	if len(hexStr) != 6 {
-		return 255, 0, 0 // 默认返回红色
+		return 0, 0, 0, fmt.Errorf("invalid hex color format: %s", hexStr)
 	}
 
-	val, err := strconv.ParseInt(hexStr, 16, 64)
+	val, err := strconv.ParseUint(hexStr, 16, 32)
 	if err != nil {
-		return 255, 0, 0
+		return 0, 0, 0, err
 	}
 
 	r := int((val >> 16) & 0xFF)
 	g := int((val >> 8) & 0xFF)
 	b := int(val & 0xFF)
-	return r, g, b
+
+	return r, g, b, nil
 }
 
 /**
